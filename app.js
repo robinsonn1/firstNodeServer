@@ -3,7 +3,7 @@ const express = require('express')
 const app = express()
 
 app.get('/', function(req, res){
-    res.send('hola mundo')
+    res.send('hola mundo 2')
 })
 app.post('/imagen', function(req, res){
     const body = req.body
