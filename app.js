@@ -5,6 +5,9 @@ const app = express()
 app.get('/', function(req, res){
     res.send('hola mundo')
 })
+app.post('/image', function(req, res){
+    res.send('hola mundo desde el post')
+})
 
 const PORT = process.env.PORT||3000 //Variable de entorno PORT
 app.listen(PORT, function(){
