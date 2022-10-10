@@ -2,6 +2,8 @@ const express = require('express')
 
 const app = express()
 
+app.use(express.json())//funcion que se ejecuta antes que la info llegue a las rutas
+
 app.get('/', function(req, res){
     res.send('hola mundo 2')
 })
