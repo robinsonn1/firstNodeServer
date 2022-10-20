@@ -1,7 +1,8 @@
 const express = require('express')
 const multer = require('multer')
 
-const upload = multer({dest: 'uploads/'})
+const storageStrategy = multer.memoryStorage()
+const upload = multer({ storage: storageStrategy })
 const app = express()
 
 app.use(express.json())//funcion que se ejecuta antes que la info llegue a las rutas
@@ -10,9 +11,9 @@ app.get('/', function(req, res){
     res.send('hola mundo 2')
 })
 app.post('/imagen', upload.single('imagen'), function(req, res){
-    const body = req.body
-    const file = req.file
-    console.log(file)
+    //const body = req.body
+    const imagen = req.file
+    console.log(imagen)
     res.send('hola mundo desde el post')
 })
 
