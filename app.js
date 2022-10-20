@@ -11,8 +11,8 @@ app.get('/', function(req, res){
 })
 app.post('/imagen', upload.single('imagen'), function(req, res){
     const body = req.body
-    const image = req.file
-    console.log(image)
+    const file = req.file
+    console.log(file)
     res.send('hola mundo desde el post')
 })
 
