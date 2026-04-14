@@ -1,26 +1,52 @@
 require('dotenv').config();
+
 const express = require('express');
 const multer = require('multer');
 const sharp = require('sharp');
 const fs = require('fs');
+const mysql = require('mysql2');
+const twilio = require('twilio');
 
 const app = express();
+
+// =========================
+// MIDDLEWARE (IMPORTANT ORDER)
+// =========================
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// =========================
+// DB CONNECTION
+// =========================
+const db = mysql.createPool({
+  host: 'localhost',
+  user: 'root',
+  password: '',
+  database: 'messaging_app'
+}).promise();
+
+// DB TEST
+db.getConnection()
+  .then(conn => {
+    console.log('✅ MySQL connected');
+    conn.release();
+  })
+  .catch(err => {
+    console.error('❌ MySQL error:', err.message);
+  });
 
 // =========================
 // TWILIO CLIENT
 // =========================
-const client = require('twilio')(
+const client = twilio(
   process.env.TWILIO_SID,
   process.env.TWILIO_AUTH_TOKEN
 );
 
 // =========================
-// MULTER CONFIG
+// MULTER (IMAGE UPLOAD)
 // =========================
-const upload = multer({
-  storage: multer.memoryStorage()
-});
+const upload = multer({ storage: multer.memoryStorage() });
 
 // =========================
 // HEALTH CHECK
@@ -30,28 +56,39 @@ app.get('/', (req, res) => {
 });
 
 // =========================
-// IMAGE PROCESSING
+// IMAGE ROUTE
 // =========================
 app.post('/imagen', upload.single('imagen'), async (req, res) => {
   try {
-    const resizedImageBuffer = await sharp(req.file.buffer)
-      .resize(800, 600, {
-        fit: "contain",
-        background: "#FFF"
-      })
+    const buffer = await sharp(req.file.buffer)
+      .resize(800, 600, { fit: "contain", background: "#FFF" })
       .toBuffer();
 
-    fs.writeFileSync('nuevaruta/prueba.png', resizedImageBuffer);
+    fs.writeFileSync('nuevaruta/prueba.png', buffer);
 
     res.json({ success: true });
   } catch (err) {
-    console.error('Image error:', err);
+    console.error(err);
     res.status(500).json({ error: err.message });
   }
 });
 
 // =========================
-// SMART MESSAGE SENDER
+// SEND RCS
+// =========================
+async function sendRCS(to, message) {
+  console.log('🚀 Sending RCS...');
+
+  return await client.messages.create({
+    messagingServiceSid: process.env.MESSAGING_SERVICE_SID,
+    to,
+    body: message,
+    statusCallback: `${process.env.BASE_URL}/status`
+  });
+}
+
+// =========================
+// SMS FALLBACK
 // =========================
 async function sendSMSFallback(to, message) {
   console.log('📲 Sending SMS fallback...');
@@ -63,80 +100,84 @@ async function sendSMSFallback(to, message) {
   });
 }
 
-async function sendRCS(to, message) {
-  console.log('🚀 Sending RCS via Messaging Service...');
-
-  return await client.messages.create({
-    messagingServiceSid: process.env.MESSAGING_SERVICE_SID,
-    to,
-    body: message,
-    statusCallback: `${process.env.BASE_URL}/status`
-  });
-}
-
 // =========================
-// MAIN ENDPOINT
+// SEND MESSAGE (MAIN FLOW)
 // =========================
 app.post('/messages/send', async (req, res) => {
   const { to, message } = req.body;
 
   try {
-    console.log('📤 Sending message:', { to, message });
+    console.log('📤 Sending:', { to, message });
 
+    const tempSid = `local_${Date.now()}`;
+
+    // 1. INSERT FIRST
+    await db.execute(
+      `INSERT INTO messages (sid, phone, message, channel, status)
+       VALUES (?, ?, ?, ?, ?)`,
+      [tempSid, to, message, 'pending', 'queued']
+    );
+
+    // 2. SEND MESSAGE
     let response;
+    let channel = 'rcs';
 
-    // 1. TRY RCS FIRST
     try {
       response = await sendRCS(to, message);
-      console.log('✅ RCS response:', response.sid);
-    } catch (rcsError) {
-      console.error('❌ RCS failed:', {
-        message: rcsError.message,
-        code: rcsError.code,
-        moreInfo: rcsError.moreInfo
-      });
-
-      // 2. FALLBACK TO SMS
+    } catch (err) {
+      console.log('❌ RCS failed → SMS fallback');
+      channel = 'sms';
       response = await sendSMSFallback(to, message);
-      console.log('📲 SMS fallback response:', response.sid);
     }
+
+    // 3. UPDATE DB WITH REAL SID
+    await db.execute(
+      `UPDATE messages
+       SET sid = ?, channel = ?, status = ?
+       WHERE sid = ?`,
+      [response.sid, channel, response.status, tempSid]
+    );
+
+    console.log('💾 Message stored in DB');
 
     res.json({
       success: true,
       sid: response.sid,
-      status: response.status,
-      to: response.to,
-      channel: response.messagingServiceSid ? 'rcs/sms-service' : 'sms'
+      channel,
+      status: response.status
     });
 
   } catch (err) {
-    console.error('🔥 FINAL ERROR:', {
-      message: err.message,
-      code: err.code,
-      moreInfo: err.moreInfo,
-      stack: err.stack
-    });
-
-    res.status(500).json({
-      success: false,
-      error: err.message,
-      code: err.code
-    });
+    console.error('🔥 SEND ERROR:', err);
+    res.status(500).json({ error: err.message });
   }
 });
 
 // =========================
-// FULL DELIVERY STATUS WEBHOOK
+// WEBHOOK (DELIVERY STATUS)
 // =========================
-app.post('/status', (req, res) => {
-  console.log('📩 ===== TWILIO WEBHOOK =====');
+app.post('/status', async (req, res) => {
+  console.log('📩 WEBHOOK RECEIVED:', req.body);
 
-  console.log(JSON.stringify({
-    event: 'delivery_update',
-    timestamp: new Date().toISOString(),
-    body: req.body,
-    headers: req.headers
-  }, null, 2));
+  const sid = req.body.MessageSid || req.body.SmsSid;
+  const status = req.body.MessageStatus || req.body.SmsStatus;
+
+  if (!sid || !status) {
+    console.log('⚠️ Missing webhook fields');
+    return res.sendStatus(200);
+  }
+
+  try {
+    const [result] = await db.execute(
+      `UPDATE messages SET status = ? WHERE sid = ?`,
+      [status, sid]
+    );
+
+    console.log(`✅ Updated ${sid} → ${status} (${result.affectedRows} rows)`);
+
+  } catch (err) {
+    console.error('❌ DB UPDATE ERROR:', err.message);
+  }
 
   res.sendStatus(200);
 });
